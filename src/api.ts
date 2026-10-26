@@ -1,7 +1,17 @@
 import type {Replicate, ReviewStatus} from "./types";
+import {supabase} from "./supabase";
 
 const BASE_URL = import.meta.env.DEV ? "" : import.meta.env.VITE_BACKEND_URL;
 const API_KEY = import.meta.env.VITE_API_KEY;
+
+async function authHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
+    const {data} = await supabase.auth.getSession();
+    return {
+        "X-API-Key": API_KEY,
+        ...(data.session ? {Authorization: `Bearer ${data.session.access_token}`} : {}),
+        ...extra,
+    };
+}
 
 async function responseError(response: Response, fallback: string): Promise<Error> {
     const detail = await response.text();
@@ -9,7 +19,7 @@ async function responseError(response: Response, fallback: string): Promise<Erro
 }
 
 export async function fetchReplicates(): Promise<Replicate[]> {
-    const response = await fetch(`${BASE_URL}/api/replicates`, {headers: {"X-API-Key": API_KEY,},});
+    const response = await fetch(`${BASE_URL}/api/replicates`, {headers: await authHeaders()});
     if (!response.ok) {
         throw await responseError(response, "Failed to fetch replicates");
     }
@@ -17,7 +27,7 @@ export async function fetchReplicates(): Promise<Replicate[]> {
 }
 
 export async function fetchImage(replicateId: string): Promise<string> {
-    const response = await fetch(`${BASE_URL}/api/images/${encodeURIComponent(replicateId)}`, {headers: {"X-API-Key": API_KEY,},},);
+    const response = await fetch(`${BASE_URL}/api/images/${encodeURIComponent(replicateId)}`, {headers: await authHeaders()});
     if (!response.ok) {
         throw await responseError(response, "Failed to fetch image");
     }
@@ -28,7 +38,7 @@ export async function fetchImage(replicateId: string): Promise<string> {
 export async function updateStatus(replicateId: string, status: ReviewStatus,): Promise<Pick<Replicate, "id" | "reviewStatus">> {
     const response = await fetch(`${BASE_URL}/api/replicates/${encodeURIComponent(replicateId)}/status`, {
         method: "PATCH",
-        headers: {"X-API-Key": API_KEY, "Content-Type": "application/json",},
+        headers: await authHeaders({"Content-Type": "application/json"}),
         body: JSON.stringify({status}),
     },);
     if (!response.ok) {

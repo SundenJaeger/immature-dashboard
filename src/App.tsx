@@ -1,8 +1,20 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {ArrowDownAZ, ArrowUpAZ, Check, ChevronDown, Columns3, GripVertical, LayoutList, Search, X} from "lucide-react";
+import {
+    ArrowDownAZ,
+    ArrowUpAZ,
+    Check,
+    ChevronDown,
+    Columns3,
+    GripVertical,
+    LayoutList,
+    LogOut,
+    Search,
+    X
+} from "lucide-react";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import {fetchImage, fetchReplicates, updateStatus} from "./api";
-import {PasswordGate} from "./PasswordGate";
+import {AuthGate} from "./AuthGate";
+import {supabase} from "./supabase";
 import type {GrainBox, Replicate, ReviewStatus} from "./types";
 import "./App.css";
 
@@ -387,6 +399,8 @@ function Dashboard() {
         <section className="main-content">
             <header className="page-header">
                 <div><h1>Record checking</h1><p>Review AI-generated detections and confirm the outcome.</p></div>
+                <button className="icon-button" type="button" aria-label="Sign out"
+                        onClick={() => supabase.auth.signOut({scope: "local"})}><LogOut size={18}/></button>
                 <div className="summary-row" aria-label="Record totals">
                     <div className="summary-chip"><strong>{records.length}</strong><span>Total</span></div>
                     {STATUS_COLUMNS.map((column) => <div className="summary-chip" key={column.key}>
@@ -527,7 +541,7 @@ function Dashboard() {
 }
 
 function App() {
-    return <PasswordGate><Dashboard/></PasswordGate>;
+    return <AuthGate><Dashboard/></AuthGate>;
 }
 
 export default App;
