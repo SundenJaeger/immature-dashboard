@@ -2,12 +2,10 @@ import type {Replicate, ReviewStatus} from "./types";
 import {supabase} from "./supabase";
 
 const BASE_URL = import.meta.env.DEV ? "" : import.meta.env.VITE_BACKEND_URL;
-const API_KEY = import.meta.env.VITE_API_KEY;
 
 async function authHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
     const {data} = await supabase.auth.getSession();
     return {
-        "X-API-Key": API_KEY,
         ...(data.session ? {Authorization: `Bearer ${data.session.access_token}`} : {}),
         ...extra,
     };
