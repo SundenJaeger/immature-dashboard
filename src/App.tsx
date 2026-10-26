@@ -394,13 +394,14 @@ function Dashboard() {
                 <button className={view === "kanban" ? "current" : ""} type="button" onClick={() => setView("kanban")}>
                     <Columns3 size={18}/>Kanban View
                 </button>
+                <button type="button" onClick={() => supabase.auth.signOut({scope: "local"})}>
+                    <LogOut size={18}/>Logout
+                </button>
             </nav>
         </aside>
         <section className="main-content">
             <header className="page-header">
                 <div><h1>Record checking</h1><p>Review AI-generated detections and confirm the outcome.</p></div>
-                <button className="icon-button" type="button" aria-label="Sign out"
-                        onClick={() => supabase.auth.signOut({scope: "local"})}><LogOut size={18}/></button>
                 <div className="summary-row" aria-label="Record totals">
                     <div className="summary-chip"><strong>{records.length}</strong><span>Total</span></div>
                     {STATUS_COLUMNS.map((column) => <div className="summary-chip" key={column.key}>
