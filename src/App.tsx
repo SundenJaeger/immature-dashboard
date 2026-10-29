@@ -1,8 +1,20 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {ArrowDownAZ, ArrowUpAZ, Check, ChevronDown, Columns3, GripVertical, LayoutList, Search, X} from "lucide-react";
+import {
+    ArrowDownAZ,
+    ArrowUpAZ,
+    Check,
+    ChevronDown,
+    Columns3,
+    GripVertical,
+    LayoutList,
+    LogOut,
+    Search,
+    X
+} from "lucide-react";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
-import {fetchImage, fetchReplicates, updateStatus} from "./api";
-import {PasswordGate} from "./PasswordGate";
+import {fetchReplicates, updateStatus} from "./api";
+import {AuthGate} from "./AuthGate";
+import {supabase} from "./supabase";
 import type {GrainBox, Replicate, ReviewStatus} from "./types";
 import "./App.css";
 
@@ -140,49 +152,26 @@ function ImageTiers({record}: { record: Replicate }) {
     const [image, setImage] = useState<HTMLImageElement | null>(null);
     const [failed, setFailed] = useState(false);
     useEffect(() => {
-        let objectUrl: string | null = null;
         let cancelled = false;
 
-        async function loadImage() {
-            try {
-                setImage(null);
-                setFailed(false);
-                objectUrl = await fetchImage(record.id);
-                if (cancelled) {
-                    URL.revokeObjectURL(objectUrl);
-                    return;
-                }
-                const source = new Image();
-                source.onload = () => {
-                    if (!cancelled) {
-                        setImage(source);
-                        setFailed(false);
-                    }
-                };
-                source.onerror = () => {
-                    if (!cancelled) {
-                        setImage(null);
-                        setFailed(true);
-                    }
-                };
-                source.src = objectUrl;
-            } catch (error) {
-                if (!cancelled) {
-                    console.error("Failed to load image:", error);
-                    setImage(null);
-                    setFailed(true);
-                }
-            }
-        }
+        setImage(null);
+        setFailed(false);
 
-        loadImage();
+        const source = new Image();
+        source.onload = () => {
+            if (!cancelled) setImage(source);
+        };
+        source.onerror = () => {
+            if (!cancelled) setFailed(true);
+        };
+        source.src = record.imageSecureUrl;
+
         return () => {
             cancelled = true;
-            if (objectUrl) {
-                URL.revokeObjectURL(objectUrl);
-            }
+            source.onload = null;
+            source.onerror = null;
         };
-    }, [record.id]);
+    }, [record.imageSecureUrl]);
     const frame = (grains: GrainBox[], color?: string) => {
         if (failed) {
             return <p className="image-message">Image unavailable</p>;
@@ -382,6 +371,9 @@ function Dashboard() {
                 <button className={view === "kanban" ? "current" : ""} type="button" onClick={() => setView("kanban")}>
                     <Columns3 size={18}/>Kanban View
                 </button>
+                <button type="button" onClick={() => supabase.auth.signOut({scope: "local"})}>
+                    <LogOut size={18}/>Logout
+                </button>
             </nav>
         </aside>
         <section className="main-content">
@@ -527,7 +519,7 @@ function Dashboard() {
 }
 
 function App() {
-    return <PasswordGate><Dashboard/></PasswordGate>;
+    return <AuthGate><Dashboard/></AuthGate>;
 }
 
 export default App;
