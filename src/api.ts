@@ -24,15 +24,6 @@ export async function fetchReplicates(): Promise<Replicate[]> {
     return (await response.json()) as Replicate[];
 }
 
-export async function fetchImage(replicateId: string): Promise<string> {
-    const response = await fetch(`${BASE_URL}/api/images/${encodeURIComponent(replicateId)}`, {headers: await authHeaders()});
-    if (!response.ok) {
-        throw await responseError(response, "Failed to fetch image");
-    }
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
-}
-
 export async function updateStatus(replicateId: string, status: ReviewStatus,): Promise<Pick<Replicate, "id" | "reviewStatus">> {
     const response = await fetch(`${BASE_URL}/api/replicates/${encodeURIComponent(replicateId)}/status`, {
         method: "PATCH",
