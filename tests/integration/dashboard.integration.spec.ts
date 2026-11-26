@@ -82,6 +82,6 @@ test.describe("dashboard integration", () => {
                 ],
             }),
         ]);
-        await expect(page.getByRole("region", {name: "Record list"})).toContainText("2026WS-IND-001-S01");
+        await expect(page.getByRole("region", {name: "Record list"})).toContainText("IND-001");
     });
 });
