@@ -6,14 +6,15 @@ React and TypeScript dashboard for reviewing grain-record submissions and AI-gen
 
 - Authenticates users with Supabase email/password authentication.
 - Loads samples with their related replicate photos from the backend API.
-- Displays one row/card per sample in a searchable, sortable table or a Kanban board.
-- Groups all photos for a sample together and shows each photo's quality, grade, and confidence.
-- Filters samples by status: All, Review, Accepted, Has rejected, or Has retraining.
-- Opens record details with capture metadata, quality measurements, and image overlays.
+- Displays one row/card per entry (season + index number), with sample 1 and sample 2 side by side, in a searchable table or a Kanban board.
+- Calculates the entry result in the browser: each sample counts its latest Good, non-rejected photo; the entry is Accepted when both samples have one; the result is the mean weight, % immature (half up, 1 decimal) and NCT grade. See `src/entries.ts`.
+- Flags a large difference between the two samples (placeholder threshold `LARGE_DIFFERENCE_POINTS`, to be confirmed).
+- Filters entries: All, Accepted entries, Pending, Large difference, Has rejected, or Has retraining.
+- Opens an entry detail with both samples, every photo (the counting photo and older photos), capture metadata and image overlays.
 - Shows AI-predicted and reviewer-confirmed grain bounding boxes.
 - Updates photo review status through the backend API, including Kanban drag-and-drop.
-- Supports manually overriding a photo's quality classification.
-- Exports all records to CSV through the backend API.
+- Supports manually overriding a photo's quality classification from the Kanban photo detail.
+- Exports all loaded photos to CSV in the browser, with the sample and entry results calculated by the dashboard.
 - Supports image zoom while preserving the current viewport.
 
 ## Requirements

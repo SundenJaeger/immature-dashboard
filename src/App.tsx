@@ -1,7 +1,5 @@
-import {useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
+import {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
 import {
-    ArrowDownAZ,
-    ArrowUpAZ,
     Columns3,
     Download,
     GripVertical,
@@ -13,26 +11,28 @@ import {
     X
 } from "lucide-react";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
-import {downloadReplicatesCsv, fetchSamples, setManualOverride, updateStatus} from "./api";
+import {fetchSamples, setManualOverride, updateStatus} from "./api";
 import {AuthGate} from "./AuthGate";
 import {supabase} from "./supabase";
 import type {GrainBox, Replicate, ReviewStatus, SampleRecord} from "./types";
 import {StatusPicker, StatusPill, type StatusPickerState} from "./components/StatusPicker";
 import {STATUS_COLUMNS, statusLabel} from "./components/status";
-import {formatConfidence, QualityBadge, qualityLabel, replicateSuffix} from "./components/Quality.tsx";
+import {formatConfidence, QualityBadge, replicateSuffix} from "./components/Quality.tsx";
+import {
+    buildEntries,
+    ENTRY_FILTERS,
+    entryPhotos,
+    type EntryFilter,
+    type EntryRecord,
+    filterEntries,
+    gradeDisplayName,
+    LARGE_DIFFERENCE_POINTS,
+    type SampleResult,
+} from "./entries";
+import {downloadRecordsCsv} from "./csv";
 import "./App.css";
 
-type View = "row" | "kanban";
-type SortOption = "name-asc" | "name-desc" | "date-desc" | "date-asc";
-type Filter = "all" | ReviewStatus;
-
-const FILTERS: Array<{ key: Filter; label: string }> = [
-    {key: "all", label: "All"},
-    {key: "review", label: "Review"},
-    {key: "accepted", label: "Accepted"},
-    {key: "rejected", label: "Has rejected"},
-    {key: "retraining", label: "Has retraining"},
-];
+type View = "entry" | "kanban";
 
 function formatDate(value: string): string {
     const date = new Date(value);
@@ -71,25 +71,6 @@ function formatGrade(grade: string): string {
 
 function sampleKey(sample: SampleRecord): string {
     return `${sample.season ?? ""}|${sample.indexNumber ?? ""}|${sample.sampleNo ?? ""}`;
-}
-
-function sampleCaptureTime(sample: SampleRecord): string {
-    return sample.replicates.map(captureTime).reduce((latest, value) => new Date(value).getTime() > new Date(latest).getTime() ? value : latest);
-}
-
-function sampleTechnicians(sample: SampleRecord): string {
-    return [...new Set(sample.replicates.map((record) => record.technicianName))].join(", ");
-}
-
-function formatSampleResult(sample: SampleRecord): string {
-    if (sample.averageGrade == null || sample.averagePercentage == null) return "Pending";
-    return `${formatGrade(sample.averageGrade)} \u00b7 ${sample.averagePercentage.toFixed(1)}%`;
-}
-
-function matchesFilter(sample: SampleRecord, filter: Filter): boolean {
-    if (filter === "all") return true;
-    if (filter === "review" || filter === "accepted") return sample.status === filter;
-    return sample.replicates.some((record) => record.reviewStatus === filter);
 }
 
 function findSiblingSample(sample: SampleRecord, samples: SampleRecord[]): SampleRecord | null {
@@ -238,16 +219,6 @@ function ImageTiers({record}: { record: Replicate }) {
                        caption={`Reviewer correction (${correctedGrains.length})`}/>
         </div>
     </>);
-}
-
-function PhotoChips({sample}: { sample: SampleRecord }) {
-    return <div className="photo-chips">
-        {sample.replicates.map((record) => {
-            const text = [replicateSuffix(record), qualityLabel(record.quality), formatGrade(record.grade), formatConfidence(record.confidence)].join(" \u00b7 ");
-            return <span key={record.id} className={`photo-chip ${record.quality}`}
-                         title={`${record.replicateLabel}: ${text}`}>{text}</span>;
-        })}
-    </div>;
 }
 
 function SampleStatusBadge({sample}: { sample: SampleRecord }) {
@@ -425,20 +396,290 @@ function DetailOverlay({
     </div>;
 }
 
-function SampleCard({sample, onOpen}: { sample: SampleRecord; onOpen: (sample: SampleRecord) => void }) {
-    return <article className="record-card" tabIndex={0} onClick={() => onOpen(sample)} onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onOpen(sample);
-        }
-    }}>
-        <div className="record-card-top"><strong>{sample.sampleId}</strong><SampleStatusBadge sample={sample}/></div>
-        <p>{sampleTechnicians(sample)}</p>
-        {sample.indexNumber && <p>{sample.season} · Index {sample.indexNumber} · Sample {formatSampleNo(sample)}</p>}
-        <p>Result: {formatSampleResult(sample)}</p>
-        <PhotoChips sample={sample}/>
-        <span>{formatDate(sampleCaptureTime(sample))}</span>
+// ---- Entry view: results in this view are calculated by the dashboard (see entries.ts). ----
+
+const ENTRY_HELP = "Accepted when sample 1 and sample 2 each have a Good photo. The latest Good photo of each sample counts. These results are calculated by the dashboard.";
+
+function ComputedTag() {
+    return <span className="computed-tag" title="Calculated by the dashboard from the photos">Computed in browser</span>;
+}
+
+function ServerTag() {
+    return <span className="server-tag" title="Stored or calculated by the backend">Server</span>;
+}
+
+function entryTitle(entry: EntryRecord): string {
+    if (entry.season && entry.indexNumber) return `${entry.season} · ${entry.indexNumber}`;
+    return [...entry.samples.map((result) => result.sample), ...entry.others].find((sample) => sample)?.sampleId ?? EM_DASH;
+}
+
+function entryStatusLabel(entry: EntryRecord): string {
+    return entry.status === "accepted" ? "Accepted" : "Pending";
+}
+
+function EntryStatusPill({entry}: { entry: EntryRecord }) {
+    return <span className={`status-pill static ${entry.status}`}>{entryStatusLabel(entry)}</span>;
+}
+
+function formatWeight(grams: number | null): string {
+    return grams == null ? EM_DASH : `${grams.toFixed(2)} g`;
+}
+
+function formatMeanWeight(grams: number | null): string {
+    if (grams == null) return EM_DASH;
+    const text = grams.toFixed(3);
+    return `${text.endsWith("0") ? text.slice(0, -1) : text} g`;
+}
+
+function formatPercent(value: number | null): string {
+    return value == null ? EM_DASH : `${value.toFixed(1)}%`;
+}
+
+function photoCount(entry: EntryRecord): number {
+    return entryPhotos(entry).length;
+}
+
+function SampleCell({result}: { result: SampleResult }) {
+    if (!result.sample) return <span className="cell-main muted">Not photographed</span>;
+    if (!result.counting) return <>
+        <span className="cell-main muted">No Good photo</span>
+        <span className="cell-sub">{result.sample.replicates.length} photo(s)</span>
+    </>;
+    return <>
+        <span className="cell-main">{formatPercent(result.percentage)} · {formatWeight(result.weight)}</span>
+        <span className="cell-sub">counts: {replicateSuffix(result.counting)} of {result.sample.replicates.length}</span>
+    </>;
+}
+
+function sampleSummary(result: SampleResult): string {
+    if (result.counting) return formatPercent(result.percentage);
+    return result.sample ? "no Good photo" : "not photographed";
+}
+
+function EntryResultText({entry}: { entry: EntryRecord }) {
+    if (entry.percentage == null) return <span className="muted">Pending</span>;
+    return <>{entry.grade} · {formatPercent(entry.percentage)}<ComputedTag/></>;
+}
+
+function DifferenceText({entry}: { entry: EntryRecord }) {
+    if (entry.differencePoints == null) return <span className="muted">{EM_DASH}</span>;
+    const text = `${entry.differencePoints.toFixed(1)} pts`;
+    return entry.largeDifference ? <span className="flag">{text}</span> : <>{text}</>;
+}
+
+function openOnKey(event: React.KeyboardEvent, open: () => void) {
+    if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+    }
+}
+
+function EntryCard({entry, onOpen}: { entry: EntryRecord; onOpen: (entry: EntryRecord) => void }) {
+    return <article className="record-card" tabIndex={0} onClick={() => onOpen(entry)}
+                    onKeyDown={(event) => openOnKey(event, () => onOpen(entry))}>
+        <div className="record-card-top"><strong>{entryTitle(entry)}</strong><EntryStatusPill entry={entry}/></div>
+        <p>{entry.selectionName ?? EM_DASH} · {photoCount(entry)} photos</p>
+        <p>S1: {sampleSummary(entry.samples[0])} · S2: {sampleSummary(entry.samples[1])}</p>
+        <p>Entry result: <EntryResultText entry={entry}/></p>
+        {entry.largeDifference && entry.differencePoints != null &&
+            <p><span className="flag">Large difference {entry.differencePoints.toFixed(1)} pts</span></p>}
     </article>;
+}
+
+function EntryRow({entry, onOpen}: { entry: EntryRecord; onOpen: (entry: EntryRecord) => void }) {
+    return <tr tabIndex={0} onClick={() => onOpen(entry)} onKeyDown={(event) => openOnKey(event, () => onOpen(entry))}>
+        <td className="mono-cell">{entryTitle(entry)}</td>
+        <td>{entry.selectionName ?? EM_DASH}</td>
+        <td><SampleCell result={entry.samples[0]}/></td>
+        <td><SampleCell result={entry.samples[1]}/></td>
+        <td><EntryResultText entry={entry}/></td>
+        <td><DifferenceText entry={entry}/></td>
+        <td><EntryStatusPill entry={entry}/><ComputedTag/></td>
+        <td className="mono-cell">{photoCount(entry)}</td>
+    </tr>;
+}
+
+function PhotoRow({photo, counts, selected, onSelect}: {
+    photo: Replicate;
+    counts: boolean;
+    selected: boolean;
+    onSelect: (photo: Replicate) => void;
+}) {
+    return <button type="button" className={`photo-row ${counts ? "counts" : "older"} ${selected ? "selected" : ""}`}
+                   aria-pressed={selected} onClick={() => onSelect(photo)}>
+        <span className="photo-row-label">{replicateSuffix(photo)}</span>
+        {counts ? <span className="tag-counts">Counts</span> : <span className="tag-older">Older · not counted</span>}
+        <QualityBadge record={photo}/>
+        <span className={`status-pill static ${photo.reviewStatus}`}>{statusLabel(photo.reviewStatus)}</span>
+        <span className="photo-row-weight">{formatWeight(photo.immatureWeight)}</span>
+    </button>;
+}
+
+function SampleColumn({result, selectedId, onSelect}: {
+    result: SampleResult;
+    selectedId: string | null;
+    onSelect: (photo: Replicate) => void;
+}) {
+    const sample = result.sample;
+    return <div className="sample-col">
+        <h4>Sample {result.sampleNo} of 2</h4>
+        {!sample ? <p className="empty-sample">Not photographed yet. The entry stays Pending.</p> : <>
+            <p className="sample-col-id">{sample.sampleId}</p>
+            {sample.replicates.toSorted((left, right) => left.replicateNo - right.replicateNo).map((photo) =>
+                <PhotoRow key={photo.id} photo={photo} counts={photo.id === result.counting?.id}
+                          selected={photo.id === selectedId} onSelect={onSelect}/>)}
+            {result.counting
+                ? <p className="help-text strong">Sample result: <strong>{formatPercent(result.percentage)}</strong> · {formatWeight(result.weight)} · {result.grade}<ComputedTag/></p>
+                : <p className="help-text">No Good photo yet.<ComputedTag/></p>}
+            <p className="help-text">Server sample status (auto-accept): <span
+                className={`status-pill static ${sample.status}`}>{statusLabel(sample.status)}</span> · server
+                average of accepted photos: {formatWeight(sample.averageWeight)}<ServerTag/></p>
+        </>}
+    </div>;
+}
+
+function EntryDetail({entry, selectedId, onSelectPhoto, onClose, onOpenStatus}: {
+    entry: EntryRecord;
+    selectedId: string | null;
+    onSelectPhoto: (photo: Replicate) => void;
+    onClose: () => void;
+    onOpenStatus: (anchor: HTMLElement, record: Replicate) => void;
+}) {
+    useEffect(() => {
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === "Escape") onClose();
+        };
+        window.addEventListener("keydown", closeOnEscape);
+        return () => window.removeEventListener("keydown", closeOnEscape);
+    }, [onClose]);
+
+    const photos = entryPhotos(entry);
+    const record = photos.find((photo) => photo.id === selectedId)
+        ?? entry.samples[0].counting ?? entry.samples[1].counting ?? photos[0] ?? null;
+
+    return <div className="detail-overlay open" role="presentation" onMouseDown={onClose}>
+        <section className="detail-panel" role="dialog" aria-modal="true" aria-labelledby="entry-detail-title"
+                 onMouseDown={(event) => event.stopPropagation()}>
+            <header className="detail-header">
+                <div><h2 id="entry-detail-title">Entry detail</h2>
+                    <p>{entryTitle(entry)}{entry.selectionName ? ` · ${entry.selectionName}` : ""}</p></div>
+                <button className="icon-button" type="button" aria-label="Close entry detail" onClick={onClose}><X
+                    size={20} aria-hidden="true"/></button>
+            </header>
+            <div className="detail-body">
+                <h3 className="section-title">Entry result</h3>
+                <dl className="record-metadata">
+                    <div>
+                        <dt>Entry status <ComputedTag/></dt>
+                        <dd><EntryStatusPill entry={entry}/></dd>
+                    </div>
+                    <div>
+                        <dt>Mean weight <ComputedTag/></dt>
+                        <dd>{formatMeanWeight(entry.meanWeight)}</dd>
+                    </div>
+                    <div>
+                        <dt>% immature <ComputedTag/></dt>
+                        <dd>{formatPercent(entry.percentage)}</dd>
+                    </div>
+                    <div>
+                        <dt>Grade <ComputedTag/></dt>
+                        <dd>{entry.grade ?? "Pending"}</dd>
+                    </div>
+                    <div>
+                        <dt>Difference S1 vs S2 <ComputedTag/></dt>
+                        <dd>{entry.differencePoints == null ? EM_DASH : `${entry.differencePoints.toFixed(1)} pts`}
+                            {entry.largeDifference && <> <span className="flag">Large</span></>}</dd>
+                    </div>
+                    <div>
+                        <dt>SD of weights <ComputedTag/></dt>
+                        <dd>{entry.sdWeight == null ? EM_DASH : `${entry.sdWeight.toFixed(3)} g`}</dd>
+                    </div>
+                    <div>
+                        <dt>Season</dt>
+                        <dd>{entry.season ?? EM_DASH}</dd>
+                    </div>
+                    <div>
+                        <dt>Index no.</dt>
+                        <dd>{entry.indexNumber ?? EM_DASH}</dd>
+                    </div>
+                    <div>
+                        <dt>Photos</dt>
+                        <dd>{photos.length}</dd>
+                    </div>
+                </dl>
+                <p className="help-text">{ENTRY_HELP}</p>
+                <p className="help-text">% = mean weight ÷ 30 g × 100, rounded half up to 1 decimal. Large
+                    difference: more than {LARGE_DIFFERENCE_POINTS.toFixed(1)} percentage points (placeholder).</p>
+
+                <h3 className="section-title">Samples and photos</h3>
+                <div className="sample-grid">
+                    <SampleColumn result={entry.samples[0]} selectedId={record?.id ?? null} onSelect={onSelectPhoto}/>
+                    <SampleColumn result={entry.samples[1]} selectedId={record?.id ?? null} onSelect={onSelectPhoto}/>
+                </div>
+                {entry.others.length > 0 && <>
+                    <h3 className="section-title">Other</h3>
+                    <p className="help-text">Samples with a sample number other than 1 or 2. They never count.</p>
+                    {entry.others.map((sample) => <div className="sample-col other" key={sample.sampleId}>
+                        <p className="sample-col-id">{sample.sampleId} (sample no. {sample.sampleNo ?? EM_DASH})</p>
+                        {sample.replicates.map((photo) => <PhotoRow key={photo.id} photo={photo} counts={false}
+                                                                    selected={photo.id === record?.id}
+                                                                    onSelect={onSelectPhoto}/>)}
+                    </div>)}
+                </>}
+                <p className="help-text">Older photos stay visible for traceability. Select a photo to see it below.</p>
+
+                {record && <>
+                    <h3 className="section-title">Photo {record.replicateLabel}</h3>
+                    <ImageTiers key={record.id} record={record}/>
+                    <dl className="record-metadata">
+                        <div>
+                            <dt>Quality <ServerTag/></dt>
+                            <dd><QualityBadge record={record}/></dd>
+                        </div>
+                        <div>
+                            <dt>Confidence</dt>
+                            <dd>{formatConfidence(record.confidence)}</dd>
+                        </div>
+                        <div>
+                            <dt>Immature weight</dt>
+                            <dd>{formatWeight(record.immatureWeight)}</dd>
+                        </div>
+                        <div>
+                            <dt>Percentage <ServerTag/></dt>
+                            <dd>{record.percentage.toFixed(2)}%</dd>
+                        </div>
+                        <div>
+                            <dt>Photo grade <ServerTag/></dt>
+                            <dd>{gradeDisplayName(record.grade)}</dd>
+                        </div>
+                        <div>
+                            <dt>Technician</dt>
+                            <dd>{record.technicianName}</dd>
+                        </div>
+                        <div>
+                            <dt>Captured</dt>
+                            <dd>{formatOptionalDate(record.capturedAt)}</dd>
+                        </div>
+                        <div>
+                            <dt>Submitted</dt>
+                            <dd>{formatOptionalDate(record.submittedAt)}</dd>
+                        </div>
+                        <div>
+                            <dt>Processing time</dt>
+                            <dd>{formatProcessing(record)}</dd>
+                        </div>
+                        <div>
+                            <dt>Record ID</dt>
+                            <dd>{record.id}</dd>
+                        </div>
+                    </dl>
+                </>}
+            </div>
+            {record && <footer className="detail-footer"><span>Photo status ({replicateSuffix(record)}) <ServerTag/></span>
+                <StatusPill record={record} onOpen={onOpenStatus}/>
+            </footer>}
+        </section>
+    </div>;
 }
 
 function KanbanCard({record, onOpen, onOpenStatus, onDragStart, onDragEnd}: {
@@ -480,11 +721,12 @@ function KanbanCard({record, onOpen, onOpenStatus, onDragStart, onDragEnd}: {
 
 function Dashboard() {
     const queryClient = useQueryClient();
-    const [view, setView] = useState<View>("row");
-    const [filter, setFilter] = useState<Filter>("all");
+    const [view, setView] = useState<View>("entry");
+    const [filter, setFilter] = useState<EntryFilter>("all");
     const [searchTerm, setSearchTerm] = useState("");
-    const [sort, setSort] = useState<SortOption>("name-asc");
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [selectedEntryKey, setSelectedEntryKey] = useState<string | null>(null);
+    const [entryPhotoId, setEntryPhotoId] = useState<string | null>(null);
     const [picker, setPicker] = useState<StatusPickerState | null>(null);
     const [activeKanbanTab, setActiveKanbanTab] = useState<ReviewStatus>("review");
     const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -494,6 +736,8 @@ function Dashboard() {
         queryFn: fetchSamples
     });
     const records = useMemo(() => samples.flatMap((sample) => sample.replicates), [samples]);
+    // Entry results are calculated in the browser from GET /api/samples.
+    const entries = useMemo(() => buildEntries(samples, {largeDifferencePoints: LARGE_DIFFERENCE_POINTS}), [samples]);
 
     const updateMutation = useMutation({
         mutationFn: ({id, status}: { id: string; status: ReviewStatus }) => updateStatus(id, status),
@@ -520,25 +764,26 @@ function Dashboard() {
         onSettled: () => void queryClient.invalidateQueries({queryKey: ["samples"]}),
     });
 
-    // Uses the backend export endpoint, which exports every record.
-    const exportMutation = useMutation({mutationFn: downloadReplicatesCsv});
+    // Builds the CSV in the browser from the loaded data. It does not call the backend export.
+    const [exportError, setExportError] = useState<Error | null>(null);
+    const exportCsv = () => {
+        setExportError(null);
+        try {
+            downloadRecordsCsv(entries);
+        } catch (failure) {
+            setExportError(failure instanceof Error ? failure : new Error("Could not export CSV."));
+        }
+    };
 
-    const visibleSamples = useMemo(() => {
-        const term = searchTerm.trim().toLowerCase();
-        const filtered = samples.filter((sample) => matchesFilter(sample, filter) && (!term || [sample.sampleId, sample.indexNumber, sample.season, sample.selectionName, ...sample.replicates.flatMap((record) => [record.id, record.replicateLabel, record.technicianName])].some((field) => (field ?? "").toLowerCase().includes(term))));
-        const [key, direction] = sort.split("-") as ["name" | "date", "asc" | "desc"];
-        return filtered.toSorted((left, right) => {
-            const comparison = key === "name" ? left.sampleId.localeCompare(right.sampleId) : sampleCaptureTime(left).localeCompare(sampleCaptureTime(right));
-            return direction === "asc" ? comparison : -comparison;
-        });
-    }, [filter, samples, searchTerm, sort]);
+    const visibleEntries = useMemo(() => filterEntries(entries, filter, searchTerm), [entries, filter, searchTerm]);
+    const selectedEntry = entries.find((entry) => entry.key === selectedEntryKey) ?? null;
 
     const selectedSample = samples.find((sample) => sample.replicates.some((record) => record.id === selectedId)) ?? null;
     const selectedRecord = selectedSample?.replicates.find((record) => record.id === selectedId) ?? null;
     const selectedSibling = selectedSample ? findSiblingSample(selectedSample, samples) : null;
     // Kanban columns hold individual photos, so these counts are per photo.
     const counts = useMemo(() => Object.fromEntries(STATUS_COLUMNS.map(({key}) => [key, records.filter((record) => record.reviewStatus === key).length])) as Record<ReviewStatus, number>, [records]);
-    const acceptedSamples = useMemo(() => samples.filter((sample) => sample.status === "accepted").length, [samples]);
+    const acceptedEntries = useMemo(() => entries.filter((entry) => entry.status === "accepted").length, [entries]);
     const openStatusPicker = (anchor: HTMLElement, record: Replicate) => setPicker({anchor, record});
     const changeStatus = (record: Replicate, status: ReviewStatus) => {
         if (record.reviewStatus !== status) updateMutation.mutate({id: record.id, status});
@@ -547,19 +792,20 @@ function Dashboard() {
         id: record.id,
         overridden: !record.manuallyOverridden
     });
-    const toggleSort = (key: "name" | "date") => setSort((current) => {
-        const [currentKey, direction] = current.split("-") as ["name" | "date", "asc" | "desc"];
-        return currentKey === key ? `${key}-${direction === "asc" ? "desc" : "asc"}` as SortOption : `${key}-asc` as SortOption;
-    });
     const openRecord = (record: Replicate) => setSelectedId(record.id);
     const openSample = (sample: SampleRecord) => setSelectedId(sample.replicates[0].id);
-    const mutationError = updateMutation.error ?? overrideMutation.error ?? exportMutation.error;
+    const openEntry = (entry: EntryRecord) => {
+        setEntryPhotoId(null);
+        setSelectedEntryKey(entry.key);
+    };
+    const closeEntry = useCallback(() => setSelectedEntryKey(null), []);
+    const mutationError = updateMutation.error ?? overrideMutation.error ?? exportError;
 
     return <main className="app-shell">
         <aside className="sidebar"><p className="brand">Record checking</p>
             <nav aria-label="Dashboard views">
-                <button className={view === "row" ? "current" : ""} type="button" onClick={() => setView("row")}>
-                    <LayoutList size={18}/>Row view
+                <button className={view === "entry" ? "current" : ""} type="button" onClick={() => setView("entry")}>
+                    <LayoutList size={18}/>Entry view
                 </button>
                 <button className={view === "kanban" ? "current" : ""} type="button" onClick={() => setView("kanban")}>
                     <Columns3 size={18}/>Kanban View
@@ -571,41 +817,38 @@ function Dashboard() {
         </aside>
         <section className="main-content">
             <header className="page-header">
-                <div><h1>Record checking</h1><p>Review AI-generated detections and confirm the outcome.</p></div>
+                <div><h1>Record checking</h1><p>One row per entry (season + index no.). Sample 1 and sample 2 side by
+                    side.</p></div>
                 <div className="summary-row" aria-label="Record totals">
-                    <div className="summary-chip"><strong>{samples.length}</strong><span>Samples</span></div>
+                    <div className="summary-chip"><strong>{entries.length}</strong><span>Entries</span></div>
                     <div className="summary-chip"><strong>{records.length}</strong><span>Photos</span></div>
-                    <div className="summary-chip">
-                        <strong>{samples.length - acceptedSamples}</strong><span>In review</span></div>
-                    <div className="summary-chip"><strong>{acceptedSamples}</strong><span>Accepted</span></div>
+                    <div className="summary-chip" title="Calculated by the dashboard">
+                        <strong>{entries.length - acceptedEntries}</strong><span>Pending &#9670;</span></div>
+                    <div className="summary-chip" title="Calculated by the dashboard">
+                        <strong>{acceptedEntries}</strong><span>Accepted &#9670;</span></div>
                 </div>
             </header>
-            <section className={`view-panel row-view ${view === "row" ? "active" : ""}`} aria-hidden={view !== "row"}>
-                <div className="toolbar-filter" aria-label="Record filters">
-                    {FILTERS.map((option) => <button key={option.key}
-                                                     className={filter === option.key ? "active" : ""}
-                                                     type="button"
-                                                     onClick={() => setFilter(option.key)}>{option.label}</button>)}
+            <section className={`view-panel entry-view ${view === "entry" ? "active" : ""}`}
+                     aria-hidden={view !== "entry"}>
+                <p className="tag-legend"><span><ComputedTag/> = calculated by the dashboard from the photos.</span>
+                    <span><ServerTag/> = stored or calculated by the backend.</span></p>
+                <div className="toolbar-filter" aria-label="Entry filters">
+                    {ENTRY_FILTERS.map((option) => <button key={option.key}
+                                                           className={filter === option.key ? "active" : ""}
+                                                           type="button"
+                                                           onClick={() => setFilter(option.key)}>{option.label}</button>)}
                 </div>
                 <div className="toolbar-secondary"><label className="search-field" htmlFor="record-search"><Search
-                    size={17} aria-hidden="true"/><span className="visually-hidden">Search records</span><input
+                    size={17} aria-hidden="true"/><span className="visually-hidden">Search entries</span><input
                     id="record-search" type="search"
-                    placeholder="Search sample, index no., season, selection, technician"
+                    placeholder="Search index no., season, selection, sample, photo, technician"
                     value={searchTerm}
-                    onChange={(event) => setSearchTerm(event.target.value)}/></label><label className="sort-field"><span
-                    className="visually-hidden">Sort records</span><select value={sort}
-                                                                           onChange={(event) => setSort(event.target.value as SortOption)}>
-                    <option value="name-asc">Name A-Z</option>
-                    <option value="name-desc">Name Z-A</option>
-                    <option value="date-desc">Newest</option>
-                    <option value="date-asc">Oldest</option>
-                </select></label>
+                    onChange={(event) => setSearchTerm(event.target.value)}/></label>
                     <button className="export-button" type="button"
-                            title="Downloads every record from the server as CSV"
-                            disabled={records.length === 0 || exportMutation.isPending}
-                            onClick={() => exportMutation.mutate()}>
-                        <Download size={16}
-                                  aria-hidden="true"/>{exportMutation.isPending ? "Exporting..." : "Export CSV"}
+                            title="Downloads every loaded photo as CSV, with the entry results calculated by the dashboard"
+                            disabled={records.length === 0}
+                            onClick={exportCsv}>
+                        <Download size={16} aria-hidden="true"/>Export CSV
                     </button>
                 </div>
                 <section className="record-list-container" aria-label="Record list">
@@ -614,50 +857,29 @@ function Dashboard() {
                         records: {error instanceof Error ? error.message : "Unknown error"}</p>}{!isLoading && !isError && samples.length === 0 &&
                     <p className="view-message">No submissions yet.</p>}
                     {!isLoading && !isError && samples.length > 0 && <>
-                        <div className="record-list-scroll">{visibleSamples.map((sample) => <SampleCard
-                            key={sampleKey(sample)}
-                            sample={sample}
-                            onOpen={openSample}/>)}{visibleSamples.length === 0 &&
-                            <p className="view-message">No records match the current filters.</p>}</div>
+                        <div className="record-list-scroll">{visibleEntries.map((entry) => <EntryCard
+                            key={entry.key}
+                            entry={entry}
+                            onOpen={openEntry}/>)}{visibleEntries.length === 0 &&
+                            <p className="view-message">No entries match the current filters.</p>}</div>
                         <div className="record-table-wrap">
-                            <table>
+                            <table className="entry-table">
                                 <thead>
                                 <tr>
-                                    <th>
-                                        <button type="button"
-                                                onClick={() => toggleSort("name")}>Sample {sort.startsWith("name") && (sort.endsWith("asc") ?
-                                            <ArrowDownAZ size={14}/> : <ArrowUpAZ size={14}/>)}</button>
-                                    </th>
-                                    <th>Index no.</th>
-                                    <th>Season</th>
-                                    <th>Samples</th>
-                                    <th>Photos (replicate · quality · grade · confidence)</th>
-                                    <th>Technician</th>
-                                    <th>
-                                        <button type="button"
-                                                onClick={() => toggleSort("date")}>Captured {sort.startsWith("date") && (sort.endsWith("asc") ?
-                                            <ArrowDownAZ size={14}/> : <ArrowUpAZ size={14}/>)}</button>
-                                    </th>
-                                    <th>Result</th>
-                                    <th>Status</th>
+                                    <th>Entry (season · index no.)</th>
+                                    <th>Selection</th>
+                                    <th>Sample 1</th>
+                                    <th>Sample 2</th>
+                                    <th>Entry result</th>
+                                    <th>Difference</th>
+                                    <th>Entry status</th>
+                                    <th>Photos</th>
                                 </tr>
                                 </thead>
-                                <tbody>{visibleSamples.map((sample) => <tr key={sampleKey(sample)} tabIndex={0}
-                                                                           onClick={() => openSample(sample)}
-                                                                           onKeyDown={(event) => {
-                                                                               if (event.key === "Enter") openSample(sample);
-                                                                           }}>
-                                    <td className="mono-cell">{sample.sampleId}</td>
-                                    <td className="mono-cell">{sample.indexNumber ?? EM_DASH}</td>
-                                    <td className="mono-cell">{sample.season ?? EM_DASH}</td>
-                                    <td>{formatSampleNo(sample)}</td>
-                                    <td><PhotoChips sample={sample}/></td>
-                                    <td>{sampleTechnicians(sample)}</td>
-                                    <td>{formatDate(sampleCaptureTime(sample))}</td>
-                                    <td>{formatSampleResult(sample)}</td>
-                                    <td><SampleStatusBadge sample={sample}/></td>
-                                </tr>)}{visibleSamples.length === 0 && <tr>
-                                    <td className="view-message" colSpan={9}>No records match the current filters.</td>
+                                <tbody>{visibleEntries.map((entry) => <EntryRow key={entry.key} entry={entry}
+                                                                                onOpen={openEntry}/>)}
+                                {visibleEntries.length === 0 && <tr>
+                                    <td className="view-message" colSpan={8}>No entries match the current filters.</td>
                                 </tr>}</tbody>
                             </table>
                         </div>
@@ -715,8 +937,8 @@ function Dashboard() {
             </section>
         </section>
         <nav className="mobile-tab-bar" aria-label="Dashboard views">
-            <button className={view === "row" ? "current" : ""} type="button" onClick={() => setView("row")}><LayoutList
-                size={20}/><span>Row view</span></button>
+            <button className={view === "entry" ? "current" : ""} type="button" onClick={() => setView("entry")}>
+                <LayoutList size={20}/><span>Entries</span></button>
             <button className={view === "kanban" ? "current" : ""} type="button" onClick={() => setView("kanban")}>
                 <Columns3 size={20}/><span>Kanban</span></button>
         </nav>
@@ -728,6 +950,10 @@ function Dashboard() {
                                                             onSelectReplicate={openRecord}
                                                             onToggleOverride={toggleOverride}
                                                             onOpenSibling={openSample}/>}
+        {selectedEntry && <EntryDetail entry={selectedEntry} selectedId={entryPhotoId}
+                                       onSelectPhoto={(photo) => setEntryPhotoId(photo.id)}
+                                       onClose={closeEntry}
+                                       onOpenStatus={openStatusPicker}/>}
         <StatusPicker picker={picker} isUpdating={updateMutation.isPending} onSelect={changeStatus}
                       onClose={() => setPicker(null)}/>
         {mutationError && <p className="mutation-toast"
